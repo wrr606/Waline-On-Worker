@@ -4,6 +4,7 @@ import { getAvatar } from '../utils/avatar.js';
 import { parseUA } from '../utils/ua.js';
 import { renderMarkdown } from '../utils/markdown.js';
 import { reviewComment } from '../utils/llm-review.js';
+import { getSetting } from './settings.js';
 
 export const commentRoutes = new Hono<{
   Bindings: Env;
@@ -53,14 +54,20 @@ commentRoutes.post('/', async (c) => {
 
   // Determine initial status:
   // - Admin/logged-in users: always approved
-  // - AUDIT mode or LLM review enabled: waiting (reviewed asynchronously)
+  // - comment_default_status setting takes priority for anonymous users
+  // - Fallback: AUDIT env var, then approved
   let status: string;
   if (userInfo) {
     status = 'approved';
-  } else if (c.env.AUDIT) {
-    status = 'waiting';
   } else {
-    status = 'approved';
+    const defaultStatus = await getSetting(c.env.DB, 'comment_default_status').catch(() => null);
+    if (defaultStatus === 'waiting' || defaultStatus === 'approved') {
+      status = defaultStatus;
+    } else if (c.env.AUDIT) {
+      status = 'waiting';
+    } else {
+      status = 'approved';
+    }
   }
 
   // Render markdown to HTML

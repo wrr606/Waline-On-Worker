@@ -10,6 +10,7 @@ import { settingsRoutes } from './router/settings.js';
 import { oauthRoutes } from './router/oauth.js';
 import { getWalinePage } from './ui/waline-page.js';
 import { getAdminPage } from './ui/admin-panel.js';
+import { getCustomSettingsPage, get404Page } from './ui/custom-admin.js';
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -33,8 +34,8 @@ app.use(
   }),
 );
 
-// Auth middleware - parse JWT on all /api routes (non-blocking)
-app.use('/api/*', auth);
+// Auth middleware - parse JWT on all routes (non-blocking, skips if no token)
+app.use('*', auth);
 
 // Routes
 app.route('/api/comment', commentRoutes);
@@ -44,17 +45,27 @@ app.route('/api/token', tokenRoutes);
 app.route('/api/settings', settingsRoutes);
 app.route('/api/oauth', oauthRoutes);
 
-// Admin panel UI
-app.get('/ui', (c) => {
-  return c.html(getAdminPage());
+// Worker custom settings page (server-side auth-gated)
+app.get('/ui/worker-setting', async (c) => {
+  const userInfo = c.get('userInfo');
+  if (userInfo?.type !== 'administrator') {
+    return c.html(get404Page(), 404);
+  }
+  return c.html(getCustomSettingsPage(c.req.url));
 });
-app.get('/ui/*', (c) => {
-  return c.html(getAdminPage());
+
+// Admin panel UI (original @waline/admin from CDN)
+app.get('/ui', async (c) => {
+  return c.html(await getAdminPage(c.env, c.req.url));
+});
+app.get('/ui/*', async (c) => {
+  return c.html(await getAdminPage(c.env, c.req.url));
 });
 
 // Waline frontend UI (root page)
 app.get('/', async (c) => {
-  const html = await getWalinePage(c.env, c.req.url);
+  const isAdmin = c.get('userInfo')?.type === 'administrator';
+  const html = await getWalinePage(c.env, c.req.url, isAdmin);
   return c.html(html);
 });
 

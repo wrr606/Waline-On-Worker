@@ -1,7 +1,6 @@
 import { Hono } from 'hono';
 import type { Env, Variables } from '../env.js';
 import { signJwt } from '../middleware/auth.js';
-import { getAvatar } from '../utils/avatar.js';
 
 export const oauthRoutes = new Hono<{
   Bindings: Env;
@@ -11,7 +10,7 @@ export const oauthRoutes = new Hono<{
 const DEFAULT_OAUTH_URL = 'https://oauth.lithub.cc';
 
 /**
- * GET /api/oauth - OAuth login flow
+ * GET /api/oauth - OAuth login flow (matching original Waline implementation)
  *
  * Step 1 (no code): Redirect user to external OAuth provider
  * Step 2 (with code): Exchange code for user info, create/link user, issue JWT
@@ -19,7 +18,7 @@ const DEFAULT_OAUTH_URL = 'https://oauth.lithub.cc';
 oauthRoutes.get('/', async (c) => {
   const type = c.req.query('type');
   const code = c.req.query('code');
-  const state = c.req.query('state');
+  const state = c.req.query('state') || '';
   const redirect = c.req.query('redirect') || '/ui';
   const oauthUrl = c.env.OAUTH_URL || DEFAULT_OAUTH_URL;
 
@@ -29,20 +28,25 @@ oauthRoutes.get('/', async (c) => {
 
   // Step 1: No code → redirect to OAuth provider
   if (!code) {
-    const callbackUrl = new URL(c.req.url);
-    callbackUrl.search = '';
-    callbackUrl.searchParams.set('type', type);
-    callbackUrl.searchParams.set('redirect', redirect);
+    // Build callback URL (back to this endpoint with redirect & type preserved)
+    const reqUrl = new URL(c.req.url);
+    const callbackUrl = `${reqUrl.origin}/api/oauth?redirect=${encodeURIComponent(redirect)}&type=${encodeURIComponent(type)}`;
 
-    const loginUrl = `${oauthUrl}/${type}/login?redirect=${encodeURIComponent(callbackUrl.toString())}&state=${encodeURIComponent(redirect)}`;
+    // Match original: ${oauthUrl}/${type}?redirect=${callbackUrl}&state=${token}
+    // state passes through the user's JWT token (for account linking from profile page)
+    const loginUrl = `${oauthUrl}/${type}?redirect=${encodeURIComponent(callbackUrl)}&state=${encodeURIComponent(state)}`;
     return c.redirect(loginUrl);
   }
 
   // Step 2: Have code → exchange for user info
   try {
-    const userInfoUrl = `${oauthUrl}/${type}/callback?code=${encodeURIComponent(code)}${state ? '&state=' + encodeURIComponent(state) : ''}`;
+    // Match original: ${oauthUrl}/${type}?code=${code}&state=${state}
+    const params = new URLSearchParams({ code });
+    if (state) params.set('state', state);
+
+    const userInfoUrl = `${oauthUrl}/${type}?${params.toString()}`;
     const resp = await fetch(userInfoUrl, {
-      headers: { 'User-Agent': 'Waline-On-Worker/1.0' },
+      headers: { 'User-Agent': '@waline' },
     });
 
     if (!resp.ok) {
@@ -125,22 +129,10 @@ oauthRoutes.get('/', async (c) => {
     }
 
     const token = await signJwt({ id: user.id as number }, jwtSecret);
-    const avatar = (user.avatar as string) || await getAvatar((user.email as string) || '');
 
-    // Build redirect URL with token info
-    const finalRedirect = state || redirect;
-    const sep = finalRedirect.includes('?') ? '&' : '?';
-    const tokenData = JSON.stringify({
-      token,
-      email: user.email,
-      display_name: user.display_name,
-      type: user.type,
-      avatar,
-      objectId: user.id,
-      [type]: socialId,
-    });
-
-    return c.redirect(`${finalRedirect}${sep}token=${encodeURIComponent(tokenData)}`);
+    // Return just JWT token string (matching original Waline)
+    const sep = redirect.includes('?') ? '&' : '?';
+    return c.redirect(`${redirect}${sep}token=${encodeURIComponent(token)}`);
   } catch {
     return c.redirect(`${redirect}?error=oauth_error`);
   }

@@ -6,120 +6,112 @@ export const articleRoutes = new Hono<{
   Variables: Variables;
 }>();
 
+// Valid counter fields to prevent SQL injection
+const VALID_FIELDS = new Set([
+  'time',
+  'reaction0',
+  'reaction1',
+  'reaction2',
+  'reaction3',
+  'reaction4',
+  'reaction5',
+  'reaction6',
+  'reaction7',
+  'reaction8',
+]);
+
 /**
  * GET /api/article
- * Get article view counter(s)
+ * Query params:
+ *   - path / path[] (required): page path(s)
+ *   - type / type[] (optional, default: ['time']): counter field(s)
+ *
+ * Response (follows Waline /api/ format):
+ *   - single path: [{[type]: count}]
+ *   - multiple paths: [{[type]: count}, …]
  */
 articleRoutes.get('/', async (c) => {
-  const url = c.req.query('url');
-  if (!url) {
-    return c.json({ errno: 1, errmsg: 'url is required' }, 400);
+  const paths = c.req.queries('path') || c.req.queries('path[]') || [];
+  if (paths.length === 0) {
+    return c.json({ errno: 0, errmsg: '', data: 0 });
   }
 
-  const urls = url.split(',');
-  if (urls.length === 1) {
-    const result = await c.env.DB.prepare(
-      'SELECT * FROM wl_Counter WHERE url = ?',
-    )
-      .bind(urls[0])
-      .first();
-
-    return c.json({
-      errno: 0,
-      errmsg: '',
-      data: result ? formatCounter(result) : { time: 0 },
-    });
+  const types = c.req.queries('type') || c.req.queries('type[]') || ['time'];
+  const validTypes = types.filter((t) => VALID_FIELDS.has(t));
+  if (validTypes.length === 0) {
+    return c.json({ errno: 0, errmsg: '', data: paths.map(() => ({})) });
   }
 
-  const placeholders = urls.map(() => '?').join(',');
+  const placeholders = paths.map(() => '?').join(',');
   const result = await c.env.DB.prepare(
     `SELECT * FROM wl_Counter WHERE url IN (${placeholders})`,
   )
-    .bind(...urls)
+    .bind(...paths)
     .all();
 
-  const counterMap = Object.fromEntries(
-    result.results.map((r: any) => [r.url, formatCounter(r)]),
-  );
+  const respObj: Record<string, any> = {};
+  for (const row of result.results) {
+    respObj[(row as any).url] = row;
+  }
 
-  return c.json({
-    errno: 0,
-    errmsg: '',
-    data: urls.map((u) => counterMap[u] || { time: 0 }),
+  const data = paths.map((url) => {
+    const counters: Record<string, number> = {};
+    for (const field of validTypes) {
+      counters[field] = (respObj[url] as any)?.[field] || 0;
+    }
+    return counters;
   });
+
+  return c.json({ errno: 0, errmsg: '', data });
 });
 
 /**
  * POST /api/article
- * Update article view counter
+ * Body: { path, type, action }
+ *   - path: page path (maps to DB url column)
+ *   - type: counter field (e.g. 'time', 'reaction0')
+ *   - action: 'inc' | 'desc'
  */
 articleRoutes.post('/', async (c) => {
   const body = await c.req.json();
-  const { url, action } = body;
+  const { path, type = 'time', action = 'inc' } = body;
 
-  if (!url) {
-    return c.json({ errno: 1, errmsg: 'url is required' }, 400);
+  if (!path) {
+    return c.json({ errno: 1, errmsg: 'path is required' }, 400);
+  }
+
+  if (!VALID_FIELDS.has(type)) {
+    return c.json({ errno: 1, errmsg: 'invalid type' }, 400);
   }
 
   const existing = await c.env.DB.prepare(
     'SELECT * FROM wl_Counter WHERE url = ?',
   )
-    .bind(url)
+    .bind(path)
     .first();
 
   if (!existing) {
-    await c.env.DB.prepare(
-      'INSERT INTO wl_Counter (url, time) VALUES (?, 1)',
-    )
-      .bind(url)
-      .run();
-  } else if (action === 'reaction') {
-    // Handle reaction updates
-    const reactionIndex = body.reactionIndex;
-    if (reactionIndex >= 0 && reactionIndex <= 8) {
-      const field = `reaction${reactionIndex}`;
-      await c.env.DB.prepare(
-        `UPDATE wl_Counter SET ${field} = ${field} + 1, updatedAt = datetime('now') WHERE url = ?`,
-      )
-        .bind(url)
-        .run();
+    if (action === 'desc') {
+      return c.json({ errno: 0, errmsg: '', data: [{ [type]: 0 }] });
     }
-  } else {
-    // Increment view count
+
     await c.env.DB.prepare(
-      "UPDATE wl_Counter SET time = time + 1, updatedAt = datetime('now') WHERE url = ?",
+      `INSERT INTO wl_Counter (url, ${type}) VALUES (?, 1)`,
     )
-      .bind(url)
+      .bind(path)
       .run();
+
+    return c.json({ errno: 0, errmsg: '', data: [{ [type]: 1 }] });
   }
 
-  const result = await c.env.DB.prepare(
-    'SELECT * FROM wl_Counter WHERE url = ?',
+  const currentVal = (existing as any)[type] || 0;
+  const newVal = action === 'desc' ? Math.max(0, currentVal - 1) : currentVal + 1;
+
+  await c.env.DB.prepare(
+    `UPDATE wl_Counter SET ${type} = ?, updatedAt = datetime('now') WHERE url = ?`,
   )
-    .bind(url)
-    .first();
+    .bind(newVal, path)
+    .run();
 
-  return c.json({
-    errno: 0,
-    errmsg: '',
-    data: formatCounter(result),
-  });
+  return c.json({ errno: 0, errmsg: '', data: [{ [type]: newVal }] });
 });
-
-function formatCounter(row: any) {
-  if (!row) return { time: 0 };
-  return {
-    objectId: row.id,
-    time: row.time || 0,
-    url: row.url,
-    reaction0: row.reaction0 || 0,
-    reaction1: row.reaction1 || 0,
-    reaction2: row.reaction2 || 0,
-    reaction3: row.reaction3 || 0,
-    reaction4: row.reaction4 || 0,
-    reaction5: row.reaction5 || 0,
-    reaction6: row.reaction6 || 0,
-    reaction7: row.reaction7 || 0,
-    reaction8: row.reaction8 || 0,
-  };
-}

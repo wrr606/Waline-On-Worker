@@ -8,6 +8,8 @@ export const settingsRoutes = new Hono<{
 
 const ALLOWED_KEYS = new Set([
   'waline_client_version',
+  'comment_default_status',
+  'worker_display',
   'llm_enabled',
   'llm_endpoint',
   'llm_api_key',

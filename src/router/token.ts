@@ -3,6 +3,7 @@ import type { Env, Variables } from '../env.js';
 import { verifyPassword } from '../utils/password.js';
 import { signJwt } from '../middleware/auth.js';
 import { getAvatar } from '../utils/avatar.js';
+import { generateSecret, verifyTotp } from '../utils/totp.js';
 
 export const tokenRoutes = new Hono<{
   Bindings: Env;
@@ -29,6 +30,13 @@ tokenRoutes.get('/', async (c) => {
       url: userInfo.url,
       avatar: userInfo.avatar || await getAvatar(userInfo.email),
       label: userInfo.label || '',
+      github: userInfo.github,
+      twitter: userInfo.twitter,
+      facebook: userInfo.facebook,
+      google: userInfo.google,
+      weibo: userInfo.weibo,
+      qq: userInfo.qq,
+      '2fa': userInfo['2fa'] ? true : undefined,
       mailMd5: await md5(userInfo.email.toLowerCase()),
     },
   });
@@ -65,8 +73,14 @@ tokenRoutes.post('/', async (c) => {
   }
 
   // Check 2FA
-  if (user['2fa'] && body.code === undefined) {
-    return c.json({ errno: 1, errmsg: '2FA required', data: { '2fa': true } }, 401);
+  if (user['2fa']) {
+    if (!body.code) {
+      return c.json({ errno: 1, errmsg: '2FA required', data: { '2fa': true } }, 401);
+    }
+    const verified2fa = await verifyTotp(user['2fa'] as string, body.code);
+    if (!verified2fa) {
+      return c.json({ errno: 1, errmsg: 'Two factor auth verify failed, please try again' }, 401);
+    }
   }
 
   const jwtSecret = c.env.JWT_SECRET;
@@ -97,7 +111,80 @@ tokenRoutes.post('/', async (c) => {
  * DELETE /api/token - Logout
  */
 tokenRoutes.delete('/', async (c) => {
-  // JWT is stateless, client just discards the token
+  return c.json({ errno: 0, errmsg: '' });
+});
+
+/**
+ * GET /api/token/2fa - Check 2FA status or get 2FA setup info
+ */
+tokenRoutes.get('/2fa', async (c) => {
+  const userInfo = c.get('userInfo');
+  const email = c.req.query('email');
+
+  // Public check: is 2FA enabled for a given email?
+  if (!userInfo && email) {
+    const user = await c.env.DB.prepare(
+      'SELECT "2fa" FROM wl_Users WHERE email = ?',
+    ).bind(email).first();
+
+    return c.json({
+      errno: 0,
+      data: { enable: !!user && !!user['2fa'] },
+    });
+  }
+
+  // Not authenticated and no email param
+  if (!userInfo) {
+    return c.json({ errno: 0, data: { enable: false } });
+  }
+
+  // Authenticated: return 2FA setup info
+  const name = `waline_${userInfo.objectId}`;
+
+  if (userInfo['2fa'] && userInfo['2fa'].length === 32) {
+    return c.json({
+      errno: 0,
+      data: {
+        otpauth_url: `otpauth://totp/${name}?secret=${userInfo['2fa']}`,
+        secret: userInfo['2fa'],
+      },
+    });
+  }
+
+  // Generate new secret for setup
+  const secret = generateSecret(20);
+  return c.json({
+    errno: 0,
+    data: {
+      otpauth_url: `otpauth://totp/${name}?secret=${secret}`,
+      secret,
+    },
+  });
+});
+
+/**
+ * POST /api/token/2fa - Verify and enable 2FA
+ */
+tokenRoutes.post('/2fa', async (c) => {
+  const userInfo = c.get('userInfo');
+  if (!userInfo) {
+    return c.json({ errno: 1, errmsg: 'Unauthorized' }, 401);
+  }
+
+  const { secret, code } = await c.req.json();
+  if (!secret || !code || !/^\d{6}$/.test(code)) {
+    return c.json({ errno: 1, errmsg: 'Invalid 2FA code' }, 400);
+  }
+
+  const verified = await verifyTotp(secret, code);
+  if (!verified) {
+    return c.json({ errno: 1, errmsg: 'Two factor auth verify failed, please try again' }, 401);
+  }
+
+  await c.env.DB.prepare(
+    'UPDATE wl_Users SET "2fa" = ? WHERE id = ?',
+  ).bind(secret, userInfo.objectId).run();
+
   return c.json({ errno: 0, errmsg: '' });
 });
 

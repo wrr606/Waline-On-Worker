@@ -3,19 +3,24 @@ import type { Env, Variables } from '../env.js';
 
 /**
  * Non-blocking auth middleware.
- * Parses JWT from Authorization header and attaches userInfo to context.
+ * Parses JWT from Authorization header or httpOnly cookie and attaches userInfo to context.
  * Does NOT reject unauthenticated requests - individual routes decide.
  */
 export const auth = createMiddleware<{
   Bindings: Env;
   Variables: Variables;
 }>(async (c, next) => {
+  // Check Authorization header first, then URL ?token= query param
   const header = c.req.header('Authorization');
-  if (!header?.startsWith('Bearer ')) {
-    return next();
+  let token: string | undefined;
+  if (header?.startsWith('Bearer ')) {
+    token = header.slice(7);
   }
-
-  const token = header.slice(7);
+  if (!token) {
+    // Fallback: @waline/admin passes token as URL query param (e.g. /ui/profile?token=...)
+    const urlToken = new URL(c.req.url).searchParams.get('token');
+    if (urlToken) token = urlToken;
+  }
   if (!token) return next();
 
   try {
