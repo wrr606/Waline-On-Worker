@@ -48,6 +48,7 @@
 - [x] Markdown 渲染 + XSS 防护
 - [x] Gravatar 头像
 - [x] UA 解析（浏览器 / 操作系统）
+- [x] RSS 订阅
 - [x] 数据导入导出（兼容 @waline/admin 迁移面板）
 - [x] LLM 评论审查（内嵌 [waline-plugin-llm-reviewer-next](https://github.com/wuyilingwei/waline-plugin-llm-reviewer-next) 设计，支持自然语言安全策略）
 - [x] 评论默认状态控制（匿名 / 登录用户独立设置）

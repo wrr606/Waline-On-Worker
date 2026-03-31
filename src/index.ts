@@ -71,10 +71,8 @@ app.get('/ui/*', async (c) => {
 });
 
 // Waline frontend UI (root page)
-app.get('/', async (c) => {
-  const isAdmin = c.get('userInfo')?.type === 'administrator';
-  const html = await getWalinePage(c.env, c.req.url, isAdmin);
-  return c.html(html);
+app.get('/', (c) => {
+  return c.html(getWalinePage());
 });
 
 export default app;

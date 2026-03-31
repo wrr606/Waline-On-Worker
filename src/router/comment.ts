@@ -264,6 +264,127 @@ commentRoutes.delete('/:id', async (c) => {
   return c.json({ errno: 0, errmsg: '' });
 });
 
+/**
+ * GET /api/comment/rss - RSS feed for comments
+ * Query params:
+ *   - path: filter by page path
+ *   - email / user_id: get replies to a user's comments
+ *   - count: number of items (default 20, max 50)
+ */
+commentRoutes.get('/rss', async (c) => {
+  const path = c.req.query('path');
+  const email = c.req.query('email');
+  const userId = c.req.query('user_id');
+  const count = parseInt(c.req.query('count') || '20');
+  const limit = Math.min(Math.max(Number.isFinite(count) ? count : 20, 1), 50);
+
+  const siteUrl = c.env.SITE_URL || '';
+  const siteName = c.env.SITE_NAME || 'Waline';
+
+  let comments: any[];
+
+  if (path) {
+    // Filter by page path
+    const result = await c.env.DB.prepare(
+      `SELECT id, comment, insertedAt, link, nick, url, user_id FROM wl_Comment
+       WHERE url = ? AND status NOT IN ('waiting', 'spam')
+       ORDER BY insertedAt DESC LIMIT ?`,
+    )
+      .bind(path, limit)
+      .all();
+    comments = result.results;
+  } else if (email || userId) {
+    // Get replies to a user's comments
+    let parentQuery: string;
+    const parentParams: string[] = [];
+
+    if (email && userId) {
+      parentQuery = `SELECT id FROM wl_Comment WHERE status NOT IN ('waiting', 'spam') AND (mail = ? OR user_id = ?)`;
+      parentParams.push(email, userId);
+    } else if (email) {
+      parentQuery = `SELECT id FROM wl_Comment WHERE status NOT IN ('waiting', 'spam') AND mail = ?`;
+      parentParams.push(email);
+    } else {
+      parentQuery = `SELECT id FROM wl_Comment WHERE status NOT IN ('waiting', 'spam') AND user_id = ?`;
+      parentParams.push(userId!);
+    }
+
+    const parents = await c.env.DB.prepare(parentQuery).bind(...parentParams).all();
+    const parentIds = parents.results.map((r: any) => r.id);
+
+    if (parentIds.length === 0) {
+      return rssResponse(c, buildRssXml({
+        title: `${siteName} Reply Comments`,
+        link: siteUrl,
+        description: 'Recent reply comments.',
+        items: [],
+      }));
+    }
+
+    const placeholders = parentIds.map(() => '?').join(',');
+    const result = await c.env.DB.prepare(
+      `SELECT id, comment, insertedAt, link, nick, url, user_id FROM wl_Comment
+       WHERE pid IN (${placeholders}) AND status NOT IN ('waiting', 'spam')
+       ORDER BY insertedAt DESC LIMIT ?`,
+    )
+      .bind(...parentIds, limit)
+      .all();
+    comments = result.results;
+  } else {
+    // All recent comments
+    const result = await c.env.DB.prepare(
+      `SELECT id, comment, insertedAt, link, nick, url, user_id FROM wl_Comment
+       WHERE status NOT IN ('waiting', 'spam')
+       ORDER BY insertedAt DESC LIMIT ?`,
+    )
+      .bind(limit)
+      .all();
+    comments = result.results;
+  }
+
+  // Fetch user display names
+  const userIds = [...new Set(comments.map((r: any) => r.user_id).filter(Boolean))];
+  let users: any[] = [];
+  if (userIds.length > 0) {
+    const placeholders = userIds.map(() => '?').join(',');
+    const userResult = await c.env.DB.prepare(
+      `SELECT id, display_name, url FROM wl_Users WHERE id IN (${placeholders})`,
+    )
+      .bind(...userIds)
+      .all();
+    users = userResult.results;
+  }
+
+  // Build RSS items
+  const items = comments.map((comment: any) => {
+    const user = users.find((u: any) => u.id === comment.user_id);
+    const nick = user?.display_name || comment.nick || 'Anonymous';
+    const commentUrl = buildAbsoluteUrl(siteUrl, comment.url);
+    const itemLink = commentUrl ? `${commentUrl}#${comment.id}` : '';
+
+    return {
+      title: `${nick} commented${comment.url ? ` on ${comment.url}` : ''}`,
+      link: itemLink || commentUrl,
+      guid: String(comment.id),
+      pubDate: comment.insertedAt ? new Date(comment.insertedAt + 'Z').toUTCString() : new Date().toUTCString(),
+      description: comment.comment || '',
+    };
+  });
+
+  const title = path
+    ? `${siteName} Comments for ${path}`
+    : email || userId
+      ? `${siteName} Reply Comments`
+      : `${siteName} Recent Comments`;
+  const description = path
+    ? `Recent comments for ${path}.`
+    : email || userId
+      ? 'Recent reply comments.'
+      : 'Recent comments.';
+
+  return rssResponse(c, buildRssXml({ title, link: siteUrl, description, items }));
+});
+
 // --- Helper functions ---
 
 async function getCommentList(c: any) {
@@ -480,4 +601,61 @@ async function formatComment(row: any, isAdmin = false) {
   }
 
   return result;
+}
+
+// --- RSS helpers ---
+
+function escapeXml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function buildAbsoluteUrl(baseUrl: string, path: string | undefined): string {
+  if (!path) return baseUrl || '';
+  if (/^(https?:)?\/\//i.test(path)) return path;
+  if (!baseUrl) return path;
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${normalizedBase}${normalizedPath}`;
+}
+
+function buildRssXml({ title, link, description, items }: {
+  title: string;
+  link: string;
+  description: string;
+  items: { title: string; link: string; guid: string; pubDate: string; description: string }[];
+}): string {
+  const now = new Date().toUTCString();
+  const itemsXml = items
+    .map(
+      (item) => `    <item>
+      <title>${escapeXml(item.title)}</title>
+      <link>${escapeXml(item.link)}</link>
+      <guid>${escapeXml(item.guid)}</guid>
+      <pubDate>${item.pubDate}</pubDate>
+      <description><![CDATA[${item.description}]]></description>
+    </item>`,
+    )
+    .join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>${escapeXml(title)}</title>
+    <link>${escapeXml(link)}</link>
+    <description>${escapeXml(description)}</description>
+    <pubDate>${now}</pubDate>
+${itemsXml}
+  </channel>
+</rss>`;
+}
+
+function rssResponse(c: any, xml: string): Response {
+  return c.body(xml, 200, {
+    'Content-Type': 'application/rss+xml; charset=utf-8',
+  });
 }
