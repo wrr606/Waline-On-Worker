@@ -548,11 +548,16 @@ async function getAdminCommentList(c: any) {
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query('pageSize') || '10') || 10));
   const status = c.req.query('status') || '';
   const keyword = c.req.query('keyword') || '';
+  const owner = c.req.query('owner') || '';
   const offset = (page - 1) * pageSize;
 
   let where = '1=1';
   const params: unknown[] = [];
 
+  if (owner === 'mine') {
+    where += ' AND mail = ?';
+    params.push(userInfo.email);
+  }
   if (status) {
     where += ' AND status = ?';
     params.push(status);
