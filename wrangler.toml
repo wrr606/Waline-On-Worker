@@ -1,0 +1,11 @@
+name = "waline-on-worker"
+main = "src/index.ts"
+compatibility_date = "2026-05-18"
+
+[vars]
+SITE_NAME = "Waline"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "waline-db"
+database_id = "fde90939-6c89-4cce-973a-cf487a5dd594"
